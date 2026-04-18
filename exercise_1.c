@@ -68,37 +68,47 @@ void lbm_comm_ghost_exchange_ex1(lbm_comm_t * comm, lbm_mesh_t * mesh)
 	left_rank = (comm->rank_x == 0) ? MPI_PROC_NULL : comm->rank_x - 1;
 	right_rank = (comm->rank_x == comm->nb_x - 1) ? MPI_PROC_NULL : comm->rank_x + 1;
 
-	// Send our first interior column (x = 1) to the left neighbor and
-	// receive the right neighbor interior column into our right ghost (x = width - 1).
-	MPI_Sendrecv(
-		lbm_mesh_get_cell(mesh, 1, 0),
-		column_size,
-		MPI_DOUBLE,
-		left_rank,
-		0,
-		lbm_mesh_get_cell(mesh, comm->width - 1, 0),
-		column_size,
-		MPI_DOUBLE,
-		right_rank,
-		0,
-		MPI_COMM_WORLD,
-		MPI_STATUS_IGNORE
-	);
-
 	// Send our last interior column (x = width - 2) to the right neighbor and
 	// receive the left neighbor interior column into our left ghost (x = 0).
-	MPI_Sendrecv(
-		lbm_mesh_get_cell(mesh, comm->width - 2, 0),
-		column_size,
-		MPI_DOUBLE,
-		right_rank,
-		1,
-		lbm_mesh_get_cell(mesh, 0, 0),
-		column_size,
-		MPI_DOUBLE,
-		left_rank,
-		1,
-		MPI_COMM_WORLD,
-		MPI_STATUS_IGNORE
-	);
+	if (left_rank != MPI_PROC_NULL)
+		MPI_Recv(
+			lbm_mesh_get_cell(mesh, 0, 0),
+			column_size,
+			MPI_DOUBLE,
+			left_rank,
+			0,
+			MPI_COMM_WORLD,
+			MPI_STATUS_IGNORE
+		);
+	if (right_rank != MPI_PROC_NULL)
+		MPI_Send(
+			lbm_mesh_get_cell(mesh, comm->width - 2, 0),
+			column_size,
+			MPI_DOUBLE,
+			right_rank,
+			0,
+			MPI_COMM_WORLD
+		);
+
+	// Send our first interior column (x = 1) to the left neighbor and
+	// receive the right neighbor interior column into our right ghost (x = width - 1).
+	if (right_rank != MPI_PROC_NULL)
+		MPI_Recv(
+			lbm_mesh_get_cell(mesh, comm->width - 1, 0),
+			column_size,
+			MPI_DOUBLE,
+			right_rank,
+			1,
+			MPI_COMM_WORLD,
+			MPI_STATUS_IGNORE
+		);
+	if (left_rank != MPI_PROC_NULL)
+		MPI_Send(
+			lbm_mesh_get_cell(mesh, 1, 0),
+			column_size,
+			MPI_DOUBLE,
+			left_rank,
+			1,
+			MPI_COMM_WORLD
+		);
 }
