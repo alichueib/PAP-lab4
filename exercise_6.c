@@ -25,6 +25,21 @@
 #include "src/exercises.h"
 
 /****************************************************/
+static int lbm_comm_rank_from_coords_ex6(lbm_comm_t * comm, int x, int y)
+{
+	int coords[2];
+	int rank;
+
+	if (x < 0 || x >= comm->nb_x || y < 0 || y >= comm->nb_y)
+		return MPI_PROC_NULL;
+
+	coords[0] = y;
+	coords[1] = x;
+	MPI_Cart_rank(comm->communicator, coords, &rank);
+	return rank;
+}
+
+/****************************************************/
 void lbm_comm_init_ex6(lbm_comm_t * comm, int total_width, int total_height)
 {
 	//we use the same implementation than ex5
@@ -41,30 +56,166 @@ void lbm_comm_release_ex6(lbm_comm_t * comm)
 /****************************************************/
 void lbm_comm_ghost_exchange_ex6(lbm_comm_t * comm, lbm_mesh_t * mesh)
 {
-	//
-	// TODO: Implement the 2D communication with :
-	//         - non-blocking MPI functions
-	//         - use MPI type for non contiguous side 
-	//
-	// To be used:
-	//    - DIRECTIONS: the number of doubles composing a cell
-	//    - double[9] lbm_mesh_get_cell(mesh, x, y): function to get the address of a particular cell.
-	//    - comm->width : The with of the local sub-domain (containing the ghost cells)
-	//    - comm->height : The height of the local sub-domain (containing the ghost cells)
-	//
-	// TIP: create a function to get the target rank from x,y task coordinate.
-	// TIP: You can use MPI_PROC_NULL on borders.
-	// TIP: send the corner values 2 times, with the up/down/left/write communication
-	//      and with the diagonal communication in a second time, this avoid
-	//      special cases for border tasks.
-	// TIP: The previous trick require to make two batch of non-blocking communications.
+	int left_rank = lbm_comm_rank_from_coords_ex6(comm, comm->rank_x - 1, comm->rank_y);
+	int right_rank = lbm_comm_rank_from_coords_ex6(comm, comm->rank_x + 1, comm->rank_y);
+	int up_rank = lbm_comm_rank_from_coords_ex6(comm, comm->rank_x, comm->rank_y - 1);
+	int down_rank = lbm_comm_rank_from_coords_ex6(comm, comm->rank_x, comm->rank_y + 1);
+	int up_left_rank = lbm_comm_rank_from_coords_ex6(comm, comm->rank_x - 1, comm->rank_y - 1);
+	int up_right_rank = lbm_comm_rank_from_coords_ex6(comm, comm->rank_x + 1, comm->rank_y - 1);
+	int down_left_rank = lbm_comm_rank_from_coords_ex6(comm, comm->rank_x - 1, comm->rank_y + 1);
+	int down_right_rank = lbm_comm_rank_from_coords_ex6(comm, comm->rank_x + 1, comm->rank_y + 1);
+	int req_count = 0;
+	const int column_size = comm->height * DIRECTIONS;
 
-	//example to access cell
-	//double * cell = lbm_mesh_get_cell(mesh, local_x, local_y);
-	//double * cell = lbm_mesh_get_cell(mesh, comm->width - 1, 0);
+	MPI_Irecv(
+		lbm_mesh_get_cell(mesh, comm->width - 1, 0),
+		column_size,
+		MPI_DOUBLE,
+		right_rank,
+		0,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Irecv(
+		lbm_mesh_get_cell(mesh, 0, 0),
+		column_size,
+		MPI_DOUBLE,
+		left_rank,
+		1,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Isend(
+		lbm_mesh_get_cell(mesh, 1, 0),
+		column_size,
+		MPI_DOUBLE,
+		left_rank,
+		0,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Isend(
+		lbm_mesh_get_cell(mesh, comm->width - 2, 0),
+		column_size,
+		MPI_DOUBLE,
+		right_rank,
+		1,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Waitall(req_count, comm->requests, MPI_STATUSES_IGNORE);
 
-	//TODO:
-	//   - implement left/write communications
-	//   - implement top/bottom communication (non contiguous)
-	//   - implement diagonal communications
+	req_count = 0;
+	MPI_Irecv(
+		lbm_mesh_get_cell(mesh, 0, comm->height - 1),
+		1,
+		comm->type,
+		down_rank,
+		2,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Irecv(
+		lbm_mesh_get_cell(mesh, 0, 0),
+		1,
+		comm->type,
+		up_rank,
+		3,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Isend(
+		lbm_mesh_get_cell(mesh, 0, 1),
+		1,
+		comm->type,
+		up_rank,
+		2,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Isend(
+		lbm_mesh_get_cell(mesh, 0, comm->height - 2),
+		1,
+		comm->type,
+		down_rank,
+		3,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Waitall(req_count, comm->requests, MPI_STATUSES_IGNORE);
+
+	req_count = 0;
+	MPI_Irecv(
+		lbm_mesh_get_cell(mesh, comm->width - 1, comm->height - 1),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		down_right_rank,
+		4,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Irecv(
+		lbm_mesh_get_cell(mesh, 0, comm->height - 1),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		down_left_rank,
+		5,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Irecv(
+		lbm_mesh_get_cell(mesh, comm->width - 1, 0),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		up_right_rank,
+		6,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Irecv(
+		lbm_mesh_get_cell(mesh, 0, 0),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		up_left_rank,
+		7,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Isend(
+		lbm_mesh_get_cell(mesh, 1, 1),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		up_left_rank,
+		4,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Isend(
+		lbm_mesh_get_cell(mesh, comm->width - 2, 1),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		up_right_rank,
+		5,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Isend(
+		lbm_mesh_get_cell(mesh, 1, comm->height - 2),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		down_left_rank,
+		6,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Isend(
+		lbm_mesh_get_cell(mesh, comm->width - 2, comm->height - 2),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		down_right_rank,
+		7,
+		comm->communicator,
+		&comm->requests[req_count++]
+	);
+	MPI_Waitall(req_count, comm->requests, MPI_STATUSES_IGNORE);
 }
