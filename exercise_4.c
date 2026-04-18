@@ -23,37 +23,90 @@
 /****************************************************/
 #include "src/lbm_struct.h"
 #include "src/exercises.h"
+#include <string.h>
+
+/****************************************************/
+static int lbm_comm_rank_from_coords_ex4(lbm_comm_t * comm, int x, int y)
+{
+	int coords[2];
+	int rank;
+
+	if (x < 0 || x >= comm->nb_x || y < 0 || y >= comm->nb_y)
+		return MPI_PROC_NULL;
+
+	coords[0] = y;
+	coords[1] = x;
+	MPI_Cart_rank(comm->communicator, coords, &rank);
+	return rank;
+}
+
+/****************************************************/
+static void lbm_comm_pack_row_ex4(lbm_comm_t * comm, lbm_mesh_t * mesh, int y, double * buffer)
+{
+	int x;
+	const size_t cell_size = DIRECTIONS * sizeof(double);
+
+	for (x = 0; x < comm->width; x++)
+		memcpy(&buffer[x * DIRECTIONS], lbm_mesh_get_cell(mesh, x, y), cell_size);
+}
+
+/****************************************************/
+static void lbm_comm_unpack_row_ex4(lbm_comm_t * comm, lbm_mesh_t * mesh, int y, double * buffer)
+{
+	int x;
+	const size_t cell_size = DIRECTIONS * sizeof(double);
+
+	for (x = 0; x < comm->width; x++)
+		memcpy(lbm_mesh_get_cell(mesh, x, y), &buffer[x * DIRECTIONS], cell_size);
+}
 
 /****************************************************/
 void lbm_comm_init_ex4(lbm_comm_t * comm, int total_width, int total_height)
 {
-	//
-	// TODO: calculate the splitting parameters for the current task.
-	//
+	int rank;
+	int size;
+	int dims[2] = {0, 0};
+	int periods[2] = {0, 0};
+	int coords[2];
+	int local_width_without_ghost;
+	int local_height_without_ghost;
+	size_t row_buffer_size;
 
-	// TODO: calculate the number of tasks along X axis and Y axis.
-	comm->nb_x = -1;
-	comm->nb_y = -1;
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-	// TODO: calculate the current task position in the splitting
-	comm->rank_x = -1;
-	comm->rank_y = -1;
+	MPI_Dims_create(size, 2, dims);
 
-	// TODO : calculate the local sub-domain size (do not forget the 
-	//        ghost cells). Use total_width & total_height as starting 
-	//        point.
-	comm->width = -1;
-	comm->height = -1;
+	comm->nb_y = dims[0];
+	comm->nb_x = dims[1];
 
-	// TODO : calculate the absolute position  (in cell number) in the global mesh.
-	//        without accounting the ghost cells
-	//        (used to setup the obstable & initial conditions).
-	comm->x = -1;
-	comm->y = -1;
+	if (total_width % comm->nb_x != 0 || total_height % comm->nb_y != 0)
+		MPI_Abort(MPI_COMM_WORLD, -1);
 
-	//OPTIONAL : if you want to avoid allocating temporary copy buffer
-	//           for every step :
-	//comm->buffer_recv_down, comm->buffer_recv_up, comm->buffer_send_down, comm->buffer_send_up
+	MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, 0, &comm->communicator);
+	MPI_Cart_coords(comm->communicator, rank, 2, coords);
+
+	comm->rank_y = coords[0];
+	comm->rank_x = coords[1];
+
+	local_width_without_ghost = total_width / comm->nb_x;
+	local_height_without_ghost = total_height / comm->nb_y;
+
+	comm->width = local_width_without_ghost + 2;
+	comm->height = local_height_without_ghost + 2;
+
+	comm->x = comm->rank_x * local_width_without_ghost;
+	comm->y = comm->rank_y * local_height_without_ghost;
+
+	row_buffer_size = comm->width * DIRECTIONS * sizeof(double);
+	comm->buffer_send_up = malloc(row_buffer_size);
+	comm->buffer_send_down = malloc(row_buffer_size);
+	comm->buffer_recv_up = malloc(row_buffer_size);
+	comm->buffer_recv_down = malloc(row_buffer_size);
+
+	if (comm->buffer_send_up == NULL || comm->buffer_send_down == NULL ||
+	    comm->buffer_recv_up == NULL || comm->buffer_recv_down == NULL)
+		fatal("Failed to allocate communication buffers for exercise 4.");
 
 	//if debug print comm
 	//lbm_comm_print(comm);
@@ -62,35 +115,158 @@ void lbm_comm_init_ex4(lbm_comm_t * comm, int total_width, int total_height)
 /****************************************************/
 void lbm_comm_release_ex4(lbm_comm_t * comm)
 {
-	//free allocated ressources
+	free(comm->buffer_send_up);
+	free(comm->buffer_send_down);
+	free(comm->buffer_recv_up);
+	free(comm->buffer_recv_down);
+
+	comm->buffer_send_up = NULL;
+	comm->buffer_send_down = NULL;
+	comm->buffer_recv_up = NULL;
+	comm->buffer_recv_down = NULL;
+
+	if (comm->communicator != MPI_COMM_NULL)
+		MPI_Comm_free(&comm->communicator);
 }
 
 /****************************************************/
 void lbm_comm_ghost_exchange_ex4(lbm_comm_t * comm, lbm_mesh_t * mesh)
 {
-	//
-	// TODO: Implement the 2D communication with :
-	//         - blocking MPI functions
-	//         - manual copy in temp buffer for non contiguous side 
-	//
-	// To be used:
-	//    - DIRECTIONS: the number of doubles composing a cell
-	//    - double[9] lbm_mesh_get_cell(mesh, x, y): function to get the address of a particular cell.
-	//    - comm->width : The with of the local sub-domain (containing the ghost cells)
-	//    - comm->height : The height of the local sub-domain (containing the ghost cells)
-	//
-	// TIP: create a function to get the target rank from x,y task coordinate. 
-	// TIP: You can use MPI_PROC_NULL on borders.
-	// TIP: send the corner values 2 times, with the up/down/left/write communication
-	//      and with the diagonal communication in a second time, this avoid
-	//      special cases for border tasks.
+	int left_rank = lbm_comm_rank_from_coords_ex4(comm, comm->rank_x - 1, comm->rank_y);
+	int right_rank = lbm_comm_rank_from_coords_ex4(comm, comm->rank_x + 1, comm->rank_y);
+	int up_rank = lbm_comm_rank_from_coords_ex4(comm, comm->rank_x, comm->rank_y - 1);
+	int down_rank = lbm_comm_rank_from_coords_ex4(comm, comm->rank_x, comm->rank_y + 1);
+	int up_left_rank = lbm_comm_rank_from_coords_ex4(comm, comm->rank_x - 1, comm->rank_y - 1);
+	int up_right_rank = lbm_comm_rank_from_coords_ex4(comm, comm->rank_x + 1, comm->rank_y - 1);
+	int down_left_rank = lbm_comm_rank_from_coords_ex4(comm, comm->rank_x - 1, comm->rank_y + 1);
+	int down_right_rank = lbm_comm_rank_from_coords_ex4(comm, comm->rank_x + 1, comm->rank_y + 1);
+	const int column_size = comm->height * DIRECTIONS;
+	const int row_size = comm->width * DIRECTIONS;
 
-	//example to access cell
-	//double * cell = lbm_mesh_get_cell(mesh, local_x, local_y);
-	//double * cell = lbm_mesh_get_cell(mesh, comm->width - 1, 0);
+	MPI_Sendrecv(
+		lbm_mesh_get_cell(mesh, 1, 0),
+		column_size,
+		MPI_DOUBLE,
+		left_rank,
+		0,
+		lbm_mesh_get_cell(mesh, comm->width - 1, 0),
+		column_size,
+		MPI_DOUBLE,
+		right_rank,
+		0,
+		comm->communicator,
+		MPI_STATUS_IGNORE
+	);
 
-	//TODO:
-	//   - implement left/write communications
-	//   - implement top/bottom communication (non contiguous)
-	//   - implement diagonal communications
+	MPI_Sendrecv(
+		lbm_mesh_get_cell(mesh, comm->width - 2, 0),
+		column_size,
+		MPI_DOUBLE,
+		right_rank,
+		1,
+		lbm_mesh_get_cell(mesh, 0, 0),
+		column_size,
+		MPI_DOUBLE,
+		left_rank,
+		1,
+		comm->communicator,
+		MPI_STATUS_IGNORE
+	);
+
+	lbm_comm_pack_row_ex4(comm, mesh, 1, comm->buffer_send_up);
+	lbm_comm_pack_row_ex4(comm, mesh, comm->height - 2, comm->buffer_send_down);
+
+	MPI_Sendrecv(
+		comm->buffer_send_up,
+		row_size,
+		MPI_DOUBLE,
+		up_rank,
+		2,
+		comm->buffer_recv_down,
+		row_size,
+		MPI_DOUBLE,
+		down_rank,
+		2,
+		comm->communicator,
+		MPI_STATUS_IGNORE
+	);
+	if (down_rank != MPI_PROC_NULL)
+		lbm_comm_unpack_row_ex4(comm, mesh, comm->height - 1, comm->buffer_recv_down);
+
+	MPI_Sendrecv(
+		comm->buffer_send_down,
+		row_size,
+		MPI_DOUBLE,
+		down_rank,
+		3,
+		comm->buffer_recv_up,
+		row_size,
+		MPI_DOUBLE,
+		up_rank,
+		3,
+		comm->communicator,
+		MPI_STATUS_IGNORE
+	);
+	if (up_rank != MPI_PROC_NULL)
+		lbm_comm_unpack_row_ex4(comm, mesh, 0, comm->buffer_recv_up);
+
+	MPI_Sendrecv(
+		lbm_mesh_get_cell(mesh, 1, 1),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		up_left_rank,
+		4,
+		lbm_mesh_get_cell(mesh, comm->width - 1, comm->height - 1),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		down_right_rank,
+		4,
+		comm->communicator,
+		MPI_STATUS_IGNORE
+	);
+
+	MPI_Sendrecv(
+		lbm_mesh_get_cell(mesh, comm->width - 2, 1),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		up_right_rank,
+		5,
+		lbm_mesh_get_cell(mesh, 0, comm->height - 1),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		down_left_rank,
+		5,
+		comm->communicator,
+		MPI_STATUS_IGNORE
+	);
+
+	MPI_Sendrecv(
+		lbm_mesh_get_cell(mesh, 1, comm->height - 2),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		down_left_rank,
+		6,
+		lbm_mesh_get_cell(mesh, comm->width - 1, 0),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		up_right_rank,
+		6,
+		comm->communicator,
+		MPI_STATUS_IGNORE
+	);
+
+	MPI_Sendrecv(
+		lbm_mesh_get_cell(mesh, comm->width - 2, comm->height - 2),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		down_right_rank,
+		7,
+		lbm_mesh_get_cell(mesh, 0, 0),
+		DIRECTIONS,
+		MPI_DOUBLE,
+		up_left_rank,
+		7,
+		comm->communicator,
+		MPI_STATUS_IGNORE
+	);
 }
