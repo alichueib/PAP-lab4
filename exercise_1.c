@@ -25,34 +25,26 @@
 /****************************************************/
 void lbm_comm_init_ex1(lbm_comm_t * comm, int total_width, int total_height)
 {
-	int rank;
+int rank;
 	int size;
 	int local_width_without_ghost;
-
-	// Get rank information from the global communicator.
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-	// 1D decomposition: all ranks are arranged along X only.
 	comm->nb_x = size;
 	comm->nb_y = 1;
-
 	comm->rank_x = rank;
 	comm->rank_y = 0;
 
-	// The global width must be divisible by the number of X sub-domains.
+	//the global width must be divisible by the number of X sub-domains
 	if (total_width % size != 0)
-		MPI_Abort(MPI_COMM_WORLD, -1);
+		MPI_Abort(MPI_COMM_WORLD, -1); //we tried using return but it does not work, the program just hangs (deadlock) instead of exiting
 
-	local_width_without_ghost = total_width / size;
-
-	// Add one ghost column on each side and one ghost row on top/bottom.
+	local_width_without_ghost = total_width /size;
 	comm->width = local_width_without_ghost + 2;
 	comm->height = total_height + 2;
-
-	// Absolute position in the global mesh, excluding ghosts.
-	comm->x = rank * local_width_without_ghost;
 	comm->y = 0;
+	comm->x = rank * local_width_without_ghost;
 
 	//if debug print comm
 	//lbm_comm_print(comm);
@@ -61,54 +53,29 @@ void lbm_comm_init_ex1(lbm_comm_t * comm, int total_width, int total_height)
 /****************************************************/
 void lbm_comm_ghost_exchange_ex1(lbm_comm_t * comm, lbm_mesh_t * mesh)
 {
-	int left_rank;
-	int right_rank;
+	int left;
+	int right;
 	const int column_size = comm->height * DIRECTIONS;
+	left = (comm->rank_x == 0) ? MPI_PROC_NULL : comm->rank_x - 1;
+	right = (comm->rank_x == comm->nb_x - 1) ? MPI_PROC_NULL : comm->rank_x + 1;
 
-	left_rank = (comm->rank_x == 0) ? MPI_PROC_NULL : comm->rank_x - 1;
-	right_rank = (comm->rank_x == comm->nb_x - 1) ? MPI_PROC_NULL : comm->rank_x + 1;
+	if(comm->rank_x == 0){
+		left = MPI_PROC_NULL;}
+	else{
+		left = comm->rank_x - 1;}
 
-	// Send our last interior column (x = width - 2) to the right neighbor and
-	// receive the left neighbor interior column into our left ghost (x = 0).
-	if (left_rank != MPI_PROC_NULL)
-		MPI_Recv(
-			lbm_mesh_get_cell(mesh, 0, 0),
-			column_size,
-			MPI_DOUBLE,
-			left_rank,
-			0,
-			MPI_COMM_WORLD,
-			MPI_STATUS_IGNORE
-		);
-	if (right_rank != MPI_PROC_NULL)
-		MPI_Send(
-			lbm_mesh_get_cell(mesh, comm->width - 2, 0),
-			column_size,
-			MPI_DOUBLE,
-			right_rank,
-			0,
-			MPI_COMM_WORLD
-		);
+	if(comm->rank_x == comm->nb_x - 1){
+		right = MPI_PROC_NULL;}
+	else{
+		right = comm->rank_x + 1;
+	}
 
-	// Send our first interior column (x = 1) to the left neighbor and
-	// receive the right neighbor interior column into our right ghost (x = width - 1).
-	if (right_rank != MPI_PROC_NULL)
-		MPI_Recv(
-			lbm_mesh_get_cell(mesh, comm->width - 1, 0),
-			column_size,
-			MPI_DOUBLE,
-			right_rank,
-			1,
-			MPI_COMM_WORLD,
-			MPI_STATUS_IGNORE
-		);
-	if (left_rank != MPI_PROC_NULL)
-		MPI_Send(
-			lbm_mesh_get_cell(mesh, 1, 0),
-			column_size,
-			MPI_DOUBLE,
-			left_rank,
-			1,
-			MPI_COMM_WORLD
-		);
+	if (left != MPI_PROC_NULL)
+		MPI_Recv(lbm_mesh_get_cell(mesh, 0, 0), column_size, MPI_DOUBLE, left, 0, MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+	if (right != MPI_PROC_NULL)
+		MPI_Send(lbm_mesh_get_cell(mesh, comm->width - 2, 0),column_size, MPI_DOUBLE, right, 0, MPI_COMM_WORLD);
+
+	//now we should send to the left and receive from the right
+	if (right != MPI_PROC_NULL)MPI_Recv(lbm_mesh_get_cell(mesh, comm->width - 1, 0), column_size, MPI_DOUBLE,right,1, MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+	if (left != MPI_PROC_NULL)MPI_Send(lbm_mesh_get_cell(mesh, 1, 0),column_size, MPI_DOUBLE, left,1,MPI_COMM_WORLD);
 }
